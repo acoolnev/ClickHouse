@@ -369,3 +369,6 @@
 [submodule "contrib/idna"]
 	path = contrib/idna
 	url = https://github.com/ada-url/idna.git
+[submodule "contrib/aws-lambda-cpp"]
+	path = contrib/aws-lambda-cpp
+	url = https://github.com/awslabs/aws-lambda-cpp.git

@@ -140,6 +140,7 @@ add_contrib (azure-cmake azure) # requires: curl
 if (NOT OS_DARWIN)
     add_contrib (sentry-native-cmake sentry-native) # requires: curl
 endif()
+add_contrib (aws-lambda-cpp-cmake aws-lambda-cpp) # requires: curl
 add_contrib (fmtlib-cmake fmtlib)
 add_contrib (krb5-cmake krb5)
 add_contrib (cyrus-sasl-cmake cyrus-sasl) # for krb5
