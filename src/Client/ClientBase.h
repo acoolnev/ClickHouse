@@ -294,7 +294,7 @@ protected:
     /// `client_exception` must be set.
     bool have_error = false;
 
-    std::list<ExternalTable> external_tables; /// External tables info.
+    std::list<std::unique_ptr<BaseExternalTable>> external_tables; /// External tables info.
     bool send_external_tables = false;
     NameToNameMap query_parameters; /// Dictionary with query parameters for prepared statements.
 

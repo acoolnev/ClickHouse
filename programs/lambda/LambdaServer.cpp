@@ -1,4 +1,6 @@
 #include "LambdaServer.h"
+#include "LambdaConnection.h"
+#include "LambdaTable.h"
 
 #include <sys/resource.h>
 #include <Common/logger_useful.h>
@@ -48,6 +50,7 @@
 #include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTInsertQuery.h>
 #include <Processors/Formats/IOutputFormat.h>
+#include <QueryPipeline/QueryPipelineBuilder.h>
 #include <Common/ErrorHandlers.h>
 #include <Functions/UserDefined/IUserDefinedSQLObjectsStorage.h>
 #include <Functions/registerFunctions.h>
@@ -385,9 +388,7 @@ void LambdaServer::setupUsers()
 
 void LambdaServer::connect()
 {
-    connection_parameters = ConnectionParameters(config(), "localhost");
-    connection = LocalConnection::createConnection(
-        connection_parameters, global_context, need_render_progress, need_render_profile_events, server_display_name);
+    connection = std::make_unique<LambdaConnection>(global_context);
 }
 
 
@@ -478,6 +479,8 @@ catch (...)
 
 void LambdaServer::runQueryLoop()
 {
+    send_external_tables = true;
+
     do
     {
         auto query = lambda_communicator.popQuery();
@@ -486,6 +489,8 @@ void LambdaServer::runQueryLoop()
 
         try
         {
+            external_tables.emplace_back(std::make_unique<LambdaTable>("table", "a Int32", "CSV", "123"));
+
             processQueryText(*query);
 
             if (!lambda_communicator.pushResponse(std::move(query_response), true))
@@ -495,6 +500,8 @@ void LambdaServer::runQueryLoop()
         {
             lambda_communicator.pushResponse(getExceptionMessage(e, print_stack_trace, true), false);
         }
+
+        external_tables.clear();
     }
     while (true);
 }

@@ -131,15 +131,14 @@ public:
 
     void setThrottler(const ThrottlerPtr &) override {}
 
+protected:
+    virtual void createExternalTables() {}
+
+    String description = "clickhouse-local";
+
+    ContextMutablePtr query_context;
+
 private:
-    void initBlockInput();
-
-    void processOrdinaryQuery();
-
-    void processOrdinaryQueryWithProcessors();
-
-    void updateState();
-
     bool pullBlock(Block & block);
 
     void finishQuery();
@@ -150,13 +149,11 @@ private:
 
     bool pollImpl();
 
-    ContextMutablePtr query_context;
     Session session;
 
     bool send_progress;
     bool send_profile_events;
     String server_display_name;
-    String description = "clickhouse-local";
 
     std::optional<LocalQueryState> state;
 

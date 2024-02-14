@@ -430,7 +430,7 @@ void ClientBase::sendExternalTables(ASTPtr parsed_query)
 
     std::vector<ExternalTableDataPtr> data;
     for (auto & table : external_tables)
-        data.emplace_back(table.getData(global_context));
+        data.emplace_back(table->getData(global_context));
 
     if (send_external_tables)
         connection->sendExternalTablesData(data);

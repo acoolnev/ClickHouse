@@ -102,6 +102,13 @@ void LocalConnection::sendQuery(
         query_context->setFileProgressCallback([this](const FileProgress & value) { this->updateProgress(Progress(value)); });
     }
 
+    query_context->setExternalTablesInitializer([this] (ContextPtr context)
+    {
+        if (context != query_context)
+            throw Exception(ErrorCodes::LOGICAL_ERROR, "Unexpected context in external tables initializer");
+        createExternalTables();
+    });
+
     /// Switch the database to the desired one (set by the USE query)
     /// but don't attempt to do it if we are already in that database.
     /// (there is a rare case when it matters - if we deleted the current database,

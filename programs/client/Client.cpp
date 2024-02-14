@@ -1085,8 +1085,8 @@ void Client::processOptions(const OptionsDescription & options_description,
 
         try
         {
-            external_tables.emplace_back(external_options);
-            if (external_tables.back().file == "-")
+            external_tables.emplace_back(std::make_unique<ExternalTable>(external_options));
+            if (external_tables.back()->file == "-")
                 ++number_of_external_tables_with_stdin_source;
             if (number_of_external_tables_with_stdin_source > 1)
                 throw Exception(ErrorCodes::BAD_ARGUMENTS, "Two or more external tables has stdin (-) set as --file field");

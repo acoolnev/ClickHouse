@@ -1,4 +1,4 @@
-set (CLICKHOUSE_LAMBDA_SOURCES LambdaServer.cpp)
+set (CLICKHOUSE_LAMBDA_SOURCES LambdaConnection.cpp LambdaServer.cpp LambdaTable.cpp)
 
 set (CLICKHOUSE_LAMBDA_LINK
     PRIVATE
