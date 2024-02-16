@@ -64,6 +64,7 @@ private:
     std::optional<StatusFile> status;
     std::optional<std::filesystem::path> temporary_directory_to_delete;
 
+    String current_output_format;
     String query_response;
 
     LambdaHandlerCommunicator & lambda_communicator;

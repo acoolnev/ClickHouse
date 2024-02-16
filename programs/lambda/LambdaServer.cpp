@@ -480,6 +480,7 @@ catch (...)
 void LambdaServer::runQueryLoop()
 {
     send_external_tables = true;
+    const String lambda_data_table = "table";
 
     do
     {
@@ -489,9 +490,15 @@ void LambdaServer::runQueryLoop()
 
         try
         {
-            external_tables.emplace_back(std::make_unique<LambdaTable>("table", "a Int32", "CSV", "123"));
+            if (!query->input_data.empty())
+            {
+                external_tables.emplace_back(std::make_unique<LambdaTable>(lambda_data_table, std::move(query->input_structure),
+                    std::move(query->input_format), std::move(query->input_data)));
+            }
 
-            processQueryText(*query);
+            current_output_format = !query->output_format.empty() ? query->output_format : format;
+
+            processQueryText(query->query_text);
 
             if (!lambda_communicator.pushResponse(std::move(query_response), true))
                 break;
@@ -511,8 +518,6 @@ try
 {
     if (!output_format)
     {
-        String current_format = format;
-
         /// The query can specify output format or output file.
         if (const auto * query_with_output = dynamic_cast<const ASTQueryWithOutput *>(parsed_query.get()))
         {
@@ -527,17 +532,17 @@ try
                 if (has_vertical_output_suffix)
                     throw Exception(ErrorCodes::CLIENT_OUTPUT_FORMAT_SPECIFIED, "Output format already specified");
                 const auto & id = query_with_output->format->as<ASTIdentifier &>();
-                current_format = id.name();
+                current_output_format = id.name();
             }
         }
 
         if (has_vertical_output_suffix)
-            current_format = "Vertical";
+            current_output_format = "Vertical";
 
         out_file_buf = std::make_unique<WriteBufferFromString>(query_response);
 
         output_format = global_context->getOutputFormatParallelIfPossible(
-            current_format, *out_file_buf, block);
+            current_output_format, *out_file_buf, block);
 
         output_format->setAutoFlush();
     }
@@ -956,10 +961,10 @@ void lambdaServerThreadFunction(int argc, char ** argv, LambdaHandlerCommunicato
 //
 //         // Output format, TSV by default.
 //         // Lambda response payload always in JSON format in case of an error.
-//         "output-format": "CSV",
+//         "outputFormat": "CSV",
 //
 //         // Input format, TSV by default.
-//         "input-format": "CSV",
+//         "inputFormat": "CSV",
 //
 //         // Table structure for input data.
 //         "structure": "a Int64, b Int64",
@@ -970,17 +975,40 @@ void lambdaServerThreadFunction(int argc, char ** argv, LambdaHandlerCommunicato
 //         "data": "1,2\n3,4"
 //     }
 // }
+
+const String LAMBDA_QUERY_JSON_CLICK_HOUSE = "clickHouse";
+const String LAMBDA_QUERY_JSON_QUERY = "query";
+const String LAMBDA_QUERY_JSON_OUTPUT_FORMAT = "outputFormat";
+const String LAMBDA_QUERY_JSON_INPUT_FORMAT = "inputFormat";
+const String LAMBDA_QUERY_JSON_INPUT_STRUCTURE = "structure";
+const String LAMBDA_QUERY_JSON_INPUT_DATA = "data";
+const String LAMBDA_QUERY_EMPTY = "";
+
+LambdaQuery parseLambdaRequestPayload(const String& payload)
+{
+    Poco::JSON::Parser parser;
+    auto json = parser.parse(payload).extract<Poco::JSON::Object::Ptr>();
+
+    const Poco::JSON::Object::Ptr click_house_json = json->getObject(LAMBDA_QUERY_JSON_CLICK_HOUSE);
+
+    LambdaQuery lambda_query;
+
+    lambda_query.query_text = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_QUERY, LAMBDA_QUERY_EMPTY);
+    lambda_query.output_format = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_OUTPUT_FORMAT, LAMBDA_QUERY_EMPTY);
+    lambda_query.input_format = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_INPUT_FORMAT, LAMBDA_QUERY_EMPTY);
+    lambda_query.input_structure = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_INPUT_STRUCTURE, LAMBDA_QUERY_EMPTY);
+    lambda_query.input_data = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_INPUT_DATA, LAMBDA_QUERY_EMPTY);
+
+    return lambda_query;
+}
+
 aws::lambda_runtime::invocation_response lambdaHandler(DB::LambdaServerCommunicator & communicator, const aws::lambda_runtime::invocation_request & request)
 {
-    String query;
+    LambdaQuery lambda_query;
 
     try
     {
-        Poco::JSON::Parser parser;
-        auto json = parser.parse(request.payload).extract<Poco::JSON::Object::Ptr>();
-
-        const Poco::JSON::Object::Ptr click_house_json = json->getObject("clickHouse");
-        query = click_house_json->getValue<std::string>("query");
+        lambda_query = parseLambdaRequestPayload(request.payload);
     }
     catch (const Poco::Exception & e)
     {
@@ -988,7 +1016,7 @@ aws::lambda_runtime::invocation_response lambdaHandler(DB::LambdaServerCommunica
             fmt::format("Failed to parse lambda input JSON: {}", e.displayText()) , "BAD_ARGUMENTS");
     }
 
-    auto result = communicator.executeQuery(std::move(query));
+    auto result = communicator.executeQuery(std::move(lambda_query));
     if (result)
     {
         return aws::lambda_runtime::invocation_response::success(std::move(result->first), "application/json");

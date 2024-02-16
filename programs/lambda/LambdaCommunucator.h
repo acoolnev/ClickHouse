@@ -22,7 +22,7 @@ struct LambdaCommunicatorContext
         , response_queue(queue_size)
     {}
 
-    using QueryQueue = ConcurrentBoundedQueue<String>;
+    using QueryQueue = ConcurrentBoundedQueue<LambdaQuery>;
     using ResponseQueue = ConcurrentBoundedQueue<std::pair<String, bool>>;
 
     QueryQueue query_queue;
@@ -37,7 +37,7 @@ public:
     {}
 
     /// Returns a pair with the query result (or error message) and a bool indicating success.
-    std::optional<std::pair<String, bool>> executeQuery(String && query)
+    std::optional<std::pair<String, bool>> executeQuery(LambdaQuery && query)
     {
         bool pushed = context.query_queue.push(std::move(query));
 
@@ -69,13 +69,13 @@ public:
         : context(context_)
     {}
 
-    std::optional<String> popQuery()
+    std::optional<LambdaQuery> popQuery()
     {
-        String query;
-        if (!context.query_queue.pop(query))
+        LambdaQuery lambda_query;
+        if (!context.query_queue.pop(lambda_query))
             return std::nullopt;
 
-        return query;
+        return lambda_query;
     }
 
     bool pushResponse(String && response, bool success)
