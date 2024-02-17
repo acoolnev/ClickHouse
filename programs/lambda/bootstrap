@@ -1,0 +1,13 @@
+#!/bin/sh
+
+# This is a simple bootstrap implementation for /lambda-entrypoint.sh.
+# clickhouse-lambda has a built-in C++ Lambda runtime and can be specified directly in the ENTRYPOINT.
+# In such a case, the container cannot be used in standalone mode for testing locally since it needs
+# the runtime interface emulator (RIE) provided by /lambda-entrypoint.sh, which is specified as 
+# the ENTRYPOINT of the AWS lambda/provided image. The shell script does not have much overhead,
+# so for the convenience of testing, the ENTRYPOINT is not changed from its default value.
+#
+# Note that the bootstrap cannot be specified as a symbolic link to clickhouse-lambda. The clickhouse
+# binary uses the file name to figure out a mode to start.
+
+exec ${LAMBDA_TASK_ROOT}/clickhouse-lambda

@@ -32,3 +32,27 @@ if (ENABLE_FUZZING)
     set (WITH_COVERAGE ON)
     target_link_libraries(clickhouse-lambda-lib PRIVATE ${LIB_FUZZING_ENGINE})
 endif ()
+
+
+# Temporary solution to build the docker image. It should be moved to a shell script later.
+
+set (CLICKHOUSE_LAMBDA_CONTAINER_SUPPLEMENTS 
+    bootstrap
+    Dockerfile
+)
+
+set (CLICKHOUSE_LAMBDA_CONTAINER_DIRECTORY 
+    ${CMAKE_CURRENT_BINARY_DIR}/../lambda-container
+)
+
+foreach(file ${CLICKHOUSE_LAMBDA_CONTAINER_SUPPLEMENTS})
+    configure_file(${CMAKE_CURRENT_SOURCE_DIR}/${file} ${CLICKHOUSE_LAMBDA_CONTAINER_DIRECTORY}/${file} COPYONLY)
+endforeach()
+
+add_custom_target(build_lambda_container
+    DEPENDS clickhouse-lambda
+    WORKING_DIRECTORY ${CLICKHOUSE_LAMBDA_CONTAINER_DIRECTORY}
+
+    COMMAND ln -f ${CLICKHOUSE_LAMBDA_CONTAINER_DIRECTORY}/../clickhouse ${CLICKHOUSE_LAMBDA_CONTAINER_DIRECTORY}/clickhouse-lambda
+    COMMAND docker build -t clickhouse-lambda .
+)
