@@ -63,6 +63,8 @@ option (ENABLE_CLICKHOUSE_SU "A tool similar to 'su'" ${ENABLE_CLICKHOUSE_ALL})
 
 option (ENABLE_CLICKHOUSE_DISKS "A tool to manage disks" ${ENABLE_CLICKHOUSE_ALL})
 
+option (ENABLE_CLICKHOUSE_LAMBDA "AWS Lambda request handler" ${ENABLE_CLICKHOUSE_ALL})
+
 if (NOT ENABLE_NURAFT)
     # RECONFIGURE_MESSAGE_LEVEL should not be used here,
     # since ENABLE_NURAFT is set to OFF for FreeBSD and Darwin.
@@ -190,6 +192,12 @@ else()
     message(STATUS "ClickHouse su: OFF")
 endif()
 
+if (ENABLE_CLICKHOUSE_LAMBDA)
+    message(STATUS "ClickHouse lambda mode: ON")
+else()
+    message(STATUS "ClickHouse lambda mode: OFF")
+endif()
+
 configure_file (config_tools.h.in ${CONFIG_INCLUDE_PATH}/config_tools.h)
 
 macro(clickhouse_target_link_split_lib target name)
@@ -262,6 +270,10 @@ if (ENABLE_CLICKHOUSE_SELF_EXTRACTING)
     add_subdirectory (self-extracting)
 endif ()
 
+if (ENABLE_CLICKHOUSE_LAMBDA)
+    add_subdirectory (lambda)
+endif ()
+
 clickhouse_add_executable (clickhouse main.cpp)
 
 # A library that prevent usage of several functions from libc.
@@ -323,6 +335,10 @@ endif ()
 if (ENABLE_CLICKHOUSE_DISKS)
     clickhouse_target_link_split_lib(clickhouse disks)
 endif ()
+if (ENABLE_CLICKHOUSE_LAMBDA)
+    clickhouse_target_link_split_lib(clickhouse lambda)
+endif ()
+
 
 set (CLICKHOUSE_BUNDLE)
 if (ENABLE_CLICKHOUSE_SELF_EXTRACTING)
@@ -421,6 +437,11 @@ if (ENABLE_CLICKHOUSE_DISKS)
     add_custom_target (clickhouse-disks ALL COMMAND ${CMAKE_COMMAND} -E create_symlink clickhouse clickhouse-disks DEPENDS clickhouse)
     install (FILES "${CMAKE_CURRENT_BINARY_DIR}/clickhouse-disks" DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT clickhouse)
     list(APPEND CLICKHOUSE_BUNDLE clickhouse-disks)
+endif ()
+if (ENABLE_CLICKHOUSE_LAMBDA)
+    add_custom_target (clickhouse-lambda ALL COMMAND ${CMAKE_COMMAND} -E create_symlink clickhouse clickhouse-lambda DEPENDS clickhouse)
+    install (FILES "${CMAKE_CURRENT_BINARY_DIR}/clickhouse-lambda" DESTINATION ${CMAKE_INSTALL_BINDIR} COMPONENT clickhouse)
+    list(APPEND CLICKHOUSE_BUNDLE clickhouse-lambda)
 endif ()
 
 add_custom_target (clickhouse-bundle ALL DEPENDS ${CLICKHOUSE_BUNDLE})

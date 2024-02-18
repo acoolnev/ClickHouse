@@ -77,6 +77,9 @@ int mainEntryClickHouseRestart(int argc, char ** argv);
 #if ENABLE_CLICKHOUSE_DISKS
 int mainEntryClickHouseDisks(int argc, char ** argv);
 #endif
+#if ENABLE_CLICKHOUSE_LAMBDA
+int mainEntryClickHouseLambda(int argc, char ** argv);
+#endif
 
 int mainEntryClickHouseHashBinary(int, char **)
 {
@@ -151,6 +154,9 @@ std::pair<std::string_view, MainFunc> clickhouse_applications[] =
     {"hash-binary", mainEntryClickHouseHashBinary},
 #if ENABLE_CLICKHOUSE_DISKS
     {"disks", mainEntryClickHouseDisks},
+#endif
+#if ENABLE_CLICKHOUSE_LAMBDA
+    {"lambda", mainEntryClickHouseLambda},
 #endif
 };
 
