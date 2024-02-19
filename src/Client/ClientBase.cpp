@@ -292,14 +292,6 @@ void interruptSignalHandler(int signum)
 }
 
 
-/// To cancel the query on local format error.
-class LocalFormatError : public DB::Exception
-{
-public:
-    using Exception::Exception;
-};
-
-
 ClientBase::~ClientBase() = default;
 ClientBase::ClientBase() = default;
 

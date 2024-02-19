@@ -139,6 +139,15 @@ protected:
 
     void addMultiquery(std::string_view query, Arguments & common_arguments) const;
 
+    /// To cancel the query on local format error.
+    class LocalFormatError : public DB::Exception
+    {
+    public:
+        using Exception::Exception;
+    };
+
+    virtual void initOutputFormat(const Block & block, ASTPtr parsed_query);
+
 private:
     void receiveResult(ASTPtr parsed_query, Int32 signals_before_stop, bool partial_result_on_first_cancel);
     bool receiveAndProcessPacket(ASTPtr parsed_query, bool cancelled_);
@@ -165,7 +174,6 @@ private:
     void sendDataFromStdin(Block & sample, const ColumnsDescription & columns_description, ASTPtr parsed_query);
     void sendExternalTables(ASTPtr parsed_query);
 
-    void initOutputFormat(const Block & block, ASTPtr parsed_query);
     void initLogsOutputStream();
 
     String prompt() const;

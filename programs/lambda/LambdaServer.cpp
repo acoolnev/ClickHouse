@@ -5,6 +5,8 @@
 #include <Common/formatReadable.h>
 #include <base/getMemoryAmount.h>
 #include <base/errnoToString.h>
+#include <Poco/JSON/Object.h>
+#include <Poco/JSON/Parser.h>
 #include <Poco/Util/XMLConfiguration.h>
 #include <Poco/String.h>
 #include <Poco/Logger.h>
@@ -43,7 +45,9 @@
 #include <IO/UseSSL.h>
 #include <IO/SharedThreadPools.h>
 #include <Parsers/IAST.h>
+#include <Parsers/ASTIdentifier.h>
 #include <Parsers/ASTInsertQuery.h>
+#include <Processors/Formats/IOutputFormat.h>
 #include <Common/ErrorHandlers.h>
 #include <Functions/UserDefined/IUserDefinedSQLObjectsStorage.h>
 #include <Functions/registerFunctions.h>
@@ -54,10 +58,12 @@
 #include <Disks/registerDisks.h>
 #include <Formats/registerFormats.h>
 #include <Formats/FormatFactory.h>
+#include <aws/lambda-runtime/runtime.h>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/program_options/options_description.hpp>
 #include <base/argsToConfig.h>
 #include <filesystem>
+#include <thread>
 
 #include "config.h"
 
@@ -79,7 +85,9 @@ namespace ErrorCodes
 {
     extern const int BAD_ARGUMENTS;
     extern const int CANNOT_LOAD_CONFIG;
+    extern const int NOT_IMPLEMENTED;
     extern const int FILE_ALREADY_EXISTS;
+    extern const int CLIENT_OUTPUT_FORMAT_SPECIFIED;
 }
 
 void applySettingsOverridesForLambda(ContextMutablePtr context)
@@ -92,33 +100,22 @@ void applySettingsOverridesForLambda(ContextMutablePtr context)
     context->setSettings(settings);
 }
 
+LambdaServer::LambdaServer(LambdaHandlerCommunicator & lambda_communicator_)
+    : lambda_communicator(lambda_communicator_)
+{
+}
+
+LambdaServer::~LambdaServer()
+{
+    lambda_communicator.close();
+}
+
 void LambdaServer::processError(const String &) const
 {
-    if (ignore_error)
-        return;
-
-    if (is_interactive)
-    {
-        String message;
-        if (server_exception)
-        {
-            message = getExceptionMessage(*server_exception, print_stack_trace, true);
-        }
-        else if (client_exception)
-        {
-            message = client_exception->message();
-        }
-
-        fmt::print(stderr, "Received exception:\n{}\n", message);
-        fmt::print(stderr, "\n");
-    }
-    else
-    {
-        if (server_exception)
-            server_exception->rethrow();
-        if (client_exception)
-            client_exception->rethrow();
-    }
+    if (server_exception)
+        server_exception->rethrow();
+    if (client_exception)
+        client_exception->rethrow();
 }
 
 
@@ -321,50 +318,6 @@ void LambdaServer::cleanup()
 }
 
 
-static bool checkIfStdinIsRegularFile()
-{
-    struct stat file_stat;
-    return fstat(STDIN_FILENO, &file_stat) == 0 && S_ISREG(file_stat.st_mode);
-}
-
-std::string LambdaServer::getInitialCreateTableQuery()
-{
-    if (!config().has("table-structure") && !config().has("table-file") && !config().has("table-data-format") && (!checkIfStdinIsRegularFile() || queries.empty()))
-        return {};
-
-    auto table_name = backQuoteIfNeed(config().getString("table-name", "table"));
-    auto table_structure = config().getString("table-structure", "auto");
-
-    String table_file;
-    String format_from_file_name;
-    if (!config().has("table-file") || config().getString("table-file") == "-")
-    {
-        /// Use Unix tools stdin naming convention
-        table_file = "stdin";
-        format_from_file_name = FormatFactory::instance().getFormatFromFileDescriptor(STDIN_FILENO);
-    }
-    else
-    {
-        /// Use regular file
-        auto file_name = config().getString("table-file");
-        table_file = quoteString(file_name);
-        format_from_file_name = FormatFactory::instance().getFormatFromFileName(file_name, false);
-    }
-
-    auto data_format = backQuoteIfNeed(
-        config().getString("table-data-format", config().getString("format", format_from_file_name.empty() ? "TSV" : format_from_file_name)));
-
-
-    if (table_structure == "auto")
-        table_structure = "";
-    else
-        table_structure = "(" + table_structure + ")";
-
-    return fmt::format("CREATE TABLE {} {} ENGINE = File({}, {});",
-                       table_name, table_structure, data_format, table_file);
-}
-
-
 static ConfigurationPtr getConfigurationFromXMLString(const char * xml_data)
 {
     std::stringstream ss{std::string{xml_data}};    // STYLE_CHECK_ALLOW_STD_STRING_STREAM
@@ -466,32 +419,6 @@ try
         }
     }
 
-#if defined(FUZZING_MODE)
-    static bool first_time = true;
-    if (first_time)
-    {
-
-    if (queries_files.empty() && queries.empty())
-    {
-        std::cerr << "\033[31m" << "ClickHouse compiled in fuzzing mode." << "\033[0m" << std::endl;
-        std::cerr << "\033[31m" << "You have to provide a query with --query or --queries-file option." << "\033[0m" << std::endl;
-        std::cerr << "\033[31m" << "The query have to use function getFuzzerData() inside." << "\033[0m" << std::endl;
-        exit(1);
-    }
-
-    is_interactive = false;
-#else
-    is_interactive = stdin_is_a_tty
-        && (config().hasOption("interactive")
-            || (queries.empty() && !config().has("table-structure") && queries_files.empty() && !config().has("table-file")));
-#endif
-    if (!is_interactive)
-    {
-        /// We will terminate process on error
-        static KillingErrorHandler error_handler;
-        Poco::ErrorHandler::set(&error_handler);
-    }
-
     registerInterpreters();
     /// Don't initialize DateLUT
     registerFunctions();
@@ -520,55 +447,97 @@ try
         throw;
     }
 
-    if (is_interactive)
-    {
-        clearTerminal();
-        showClientVersion();
-        std::cerr << std::endl;
-    }
-
     connect();
 
-#ifdef FUZZING_MODE
-    first_time = false;
-    }
-#endif
+    runQueryLoop();
 
-    String initial_query = getInitialCreateTableQuery();
-    if (!initial_query.empty())
-        processQueryText(initial_query);
-
-    if (is_interactive && !delayed_interactive)
-    {
-        runInteractive();
-    }
-    else
-    {
-        runNonInteractive();
-
-        if (delayed_interactive)
-            runInteractive();
-    }
-
-#ifndef FUZZING_MODE
     cleanup();
-#endif
     return Application::EXIT_OK;
 }
 catch (const DB::Exception & e)
 {
     cleanup();
 
-    bool need_print_stack_trace = config().getBool("stacktrace", false);
-    std::cerr << getExceptionMessage(e, need_print_stack_trace, true) << std::endl;
+    // TODO: Investigate how to exit from the lambda runtime handler loop. Seems there is no way
+    //       to exit from the loop in case of a fatal error.
+
+    // bool need_print_stack_trace = config().getBool("stacktrace", false);
+    // std::cerr << getExceptionMessage(e, need_print_stack_trace, true) << std::endl;
     return e.code() ? e.code() : -1;
 }
 catch (...)
 {
     cleanup();
 
-    std::cerr << getCurrentExceptionMessage(false) << std::endl;
+    // TODO: Investigate how to exit from the lambda runtime handler loop. Seems there is no way
+    //       to exit from the loop in case of a fatal error.
+
+    // std::cerr << getCurrentExceptionMessage(false) << std::endl;
     return getCurrentExceptionCode();
+}
+
+void LambdaServer::runQueryLoop()
+{
+    do
+    {
+        auto query = lambda_communicator.popQuery();
+        if (!query)
+            break;
+
+        try
+        {
+            processQueryText(*query);
+
+            if (!lambda_communicator.pushResponse(std::move(query_response), true))
+                break;
+        }
+        catch (const Exception & e)
+        {
+            lambda_communicator.pushResponse(getExceptionMessage(e, print_stack_trace, true), false);
+        }
+    }
+    while (true);
+}
+
+void LambdaServer::initOutputFormat(const Block & block, ASTPtr parsed_query)
+try
+{
+    if (!output_format)
+    {
+        String current_format = format;
+
+        /// The query can specify output format or output file.
+        if (const auto * query_with_output = dynamic_cast<const ASTQueryWithOutput *>(parsed_query.get()))
+        {
+            if (query_with_output->out_file)
+            {
+                throw Exception(ErrorCodes::NOT_IMPLEMENTED,
+                    "OUTFILE file is not supported in AWS lambda queries");
+            }
+
+            if (query_with_output->format != nullptr)
+            {
+                if (has_vertical_output_suffix)
+                    throw Exception(ErrorCodes::CLIENT_OUTPUT_FORMAT_SPECIFIED, "Output format already specified");
+                const auto & id = query_with_output->format->as<ASTIdentifier &>();
+                current_format = id.name();
+            }
+        }
+
+        if (has_vertical_output_suffix)
+            current_format = "Vertical";
+
+        out_file_buf = std::make_unique<WriteBufferFromString>(query_response);
+
+        output_format = global_context->getOutputFormatParallelIfPossible(
+            current_format, *out_file_buf, block);
+
+        output_format->setAutoFlush();
+    }
+}
+catch (...)
+{
+    throw LocalFormatError(getCurrentExceptionMessageAndPattern(print_stack_trace), getCurrentExceptionCode());
 }
 
 void LambdaServer::updateLoggerLevel(const String & logs_level)
@@ -940,100 +909,114 @@ void LambdaServer::readArguments(int argc, char ** argv, Arguments & common_argu
     }
 }
 
+void lambdaServerThreadFunction(int argc, char ** argv, LambdaHandlerCommunicator & communicator)
+{
+    try
+    {
+        DB::LambdaServer app(communicator);
+
+        /// Only one argument with the executable path is expected here
+        app.init(argc, argv);
+
+        app.run();
+    }
+    catch (const DB::Exception & )
+    {
+        // TODO: Investigate how to exit from the lambda runtime handler loop. Seems there is no way
+        //       to exit from the loop in case of a fatal error.
+
+        // communicator.pushResponse(fmt::format("Could not initialize lambda. Code: {}. DB::Exception: {}",
+        //     DB::getCurrentExceptionCode(), DB::getExceptionMessage(e, false)), false);
+    }
+    catch (...)
+    {
+        // TODO: Investigate how to exit from the lambda runtime handler loop. Seems there is no way
+        //       to exit from the loop in case of a fatal error.
+
+        // communicator.pushResponse(fmt::format("Could not initialize lambda. Code: {}. Exception: {}",
+        //     DB::getCurrentExceptionCode(), DB::getCurrentExceptionMessage(true)), false);
+    }
+}
+
+// Here is a JSON format for a request payload:
+// {
+//     "clickHouse": 
+//     {
+//         // Query to execute.
+//         // If input is provided in 'data' field then it can be retrieved from automatically
+//         // created table with name 'table'.
+//         "query": "SELECT * from table",
+//
+//         // Output format, TSV by default.
+//         // Lambda response payload always in JSON format in case of an error.
+//         "output-format": "CSV",
+//
+//         // Input format, TSV by default.
+//         "input-format": "CSV",
+//
+//         // Table structure for input data.
+//         "structure": "a Int64, b Int64",
+//
+//         // Input data if the query does not use an external source such as S3 file.
+//         // A table with name 'table' is created automatically with structure specified.
+//         // in 'structure' field.
+//         "data": "1,2\n3,4"
+//     }
+// }
+aws::lambda_runtime::invocation_response lambdaHandler(DB::LambdaServerCommunicator & communicator, const aws::lambda_runtime::invocation_request & request)
+{
+    String query;
+
+    try
+    {
+        Poco::JSON::Parser parser;
+        auto json = parser.parse(request.payload).extract<Poco::JSON::Object::Ptr>();
+
+        const Poco::JSON::Object::Ptr click_house_json = json->getObject("clickHouse");
+        query = click_house_json->getValue<std::string>("query");
+    }
+    catch (const Poco::Exception & e)
+    {
+        return aws::lambda_runtime::invocation_response::failure(
+            fmt::format("Failed to parse lambda input JSON: {}", e.displayText()) , "BAD_ARGUMENTS");
+    }
+
+    auto result = communicator.executeQuery(std::move(query));
+    if (result)
+    {
+        return aws::lambda_runtime::invocation_response::success(std::move(result->first), "application/json");
+    }
+    else
+    {
+        return aws::lambda_runtime::invocation_response::failure("ClickHouse lambda server disconnected", "FAILURE");
+    }
+}
+
 }
 
 #pragma GCC diagnostic ignored "-Wunused-function"
 #pragma GCC diagnostic ignored "-Wmissing-declarations"
 
-int mainEntryClickHouseLambda(int argc, char ** argv)
+int mainEntryClickHouseLambda([[maybe_unused]] int argc, [[maybe_unused]] char ** argv)
 {
-    try
+    DB::LambdaCommunicatorContext context(10);
+
+    DB::LambdaHandlerCommunicator handler_communicator(context);
+    std::thread server_thread([argv, & handler_communicator]
     {
-        DB::LambdaServer app;
-        app.init(argc, argv);
-        return app.run();
-    }
-    catch (const DB::Exception & e)
+        DB::lambdaServerThreadFunction(1, argv, handler_communicator);
+    });
+
+    DB::LambdaServerCommunicator server_communicator(context);
+
+    aws::lambda_runtime::run_handler([& server_communicator](const aws::lambda_runtime::invocation_request & request)
     {
-        std::cerr << DB::getExceptionMessage(e, false) << std::endl;
-        auto code = DB::getCurrentExceptionCode();
-        return code ? code : 1;
-    }
-    catch (const boost::program_options::error & e)
-    {
-        std::cerr << "Bad arguments: " << e.what() << std::endl;
-        return DB::ErrorCodes::BAD_ARGUMENTS;
-    }
-    catch (...)
-    {
-        std::cerr << DB::getCurrentExceptionMessage(true) << '\n';
-        auto code = DB::getCurrentExceptionCode();
-        return code ? code : 1;
-    }
-}
+        return DB::lambdaHandler(server_communicator, request);
+    });
 
-#if defined(FUZZING_MODE)
+    server_communicator.close();
 
-// linked from programs/main.cpp
-bool isClickhouseApp(const std::string & app_suffix, std::vector<char *> & argv);
-
-std::optional<DB::LambdaServer> fuzz_app;
-
-extern "C" int LLVMFuzzerInitialize(int * pargc, char *** pargv)
-{
-    std::vector<char *> argv(*pargv, *pargv + (*pargc + 1));
-
-    if (!isClickhouseApp("local", argv))
-    {
-        std::cerr << "\033[31m" << "ClickHouse compiled in fuzzing mode, only clickhouse local is available." << "\033[0m" << std::endl;
-        exit(1);
-    }
-
-    /// As a user you can add flags to clickhouse binary in fuzzing mode as follows
-    /// clickhouse local <set of clickhouse-local specific flag> -- <set of libfuzzer flags>
-
-    char **p = &(*pargv)[1];
-
-    auto it = argv.begin() + 1;
-    for (; *it; ++it)
-        if (strcmp(*it, "--") == 0)
-        {
-            ++it;
-            break;
-        }
-
-    while (*it)
-        if (strncmp(*it, "--", 2) != 0)
-        {
-            *(p++) = *it;
-            it = argv.erase(it);
-        }
-        else
-            ++it;
-
-    *pargc = static_cast<int>(p - &(*pargv)[0]);
-    *p = nullptr;
-
-    /// Initialize clickhouse-local app
-    fuzz_app.emplace();
-    fuzz_app->init(static_cast<int>(argv.size() - 1), argv.data());
-
+    server_thread.join();
     return 0;
+
 }
-
-
-extern "C" int LLVMFuzzerTestOneInput(const uint8_t * data, size_t size)
-{
-    try
-    {
-        auto input = String(reinterpret_cast<const char *>(data), size);
-        DB::FunctionGetFuzzerData::update(input);
-        fuzz_app->run();
-    }
-    catch (...)
-    {
-    }
-
-    return 0;
-}
-#endif

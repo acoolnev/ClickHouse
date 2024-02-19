@@ -1,10 +1,12 @@
 #pragma once
 
+#include "LambdaCommunucator.h"
+
 #include <Client/ClientBase.h>
 #include <Client/LocalConnection.h>
 
-#include <Common/StatusFile.h>
 #include <Common/InterruptListener.h>
+#include <Common/StatusFile.h>
 #include <Loggers/Loggers.h>
 #include <Core/Settings.h>
 #include <Interpreters/Context.h>
@@ -20,7 +22,8 @@ namespace DB
 class LambdaServer : public ClientBase, public Loggers
 {
 public:
-    LambdaServer() = default;
+    LambdaServer(LambdaHandlerCommunicator & lambda_communicator);
+    ~LambdaServer() override;
 
     void initialize(Poco::Util::Application & self) override;
 
@@ -46,12 +49,10 @@ protected:
 
     void updateLoggerLevel(const String & logs_level) override;
 
+    void initOutputFormat(const Block & block, ASTPtr parsed_query) final;
+
 private:
-    /** Composes CREATE subquery based on passed arguments (--structure --file --table and --input-format)
-      * This query will be executed first, before queries passed through --query argument
-      * Returns empty string if it cannot compose that query.
-      */
-    std::string getInitialCreateTableQuery();
+    void runQueryLoop();
 
     void tryInitPath();
     void setupUsers();
@@ -62,6 +63,10 @@ private:
 
     std::optional<StatusFile> status;
     std::optional<std::filesystem::path> temporary_directory_to_delete;
+
+    String query_response;
+
+    LambdaHandlerCommunicator & lambda_communicator;
 };
 
 }
