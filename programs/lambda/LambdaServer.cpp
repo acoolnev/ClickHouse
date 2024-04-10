@@ -29,6 +29,7 @@
 #include <Common/scope_guard_safe.h>
 #include <Interpreters/Session.h>
 #include <Access/AccessControl.h>
+#include <Common/Base64.h>
 #include <Common/PoolId.h>
 #include <Common/Exception.h>
 #include <Common/Macros.h>
@@ -497,15 +498,15 @@ void LambdaServer::runQueryLoop()
             }
 
             current_output_format = !query->output_format.empty() ? query->output_format : format;
-
+            
             processQueryText(query->query_text);
 
-            if (!lambda_communicator.pushResponse(std::move(query_response), true))
+            if (!lambda_communicator.pushResponse(LambdaResult(current_output_format, std::move(query_response))))
                 break;
         }
         catch (const Exception & e)
         {
-            lambda_communicator.pushResponse(getExceptionMessage(e, print_stack_trace, true), false);
+            lambda_communicator.pushResponse(LambdaResult(getExceptionMessage(e, print_stack_trace, true)));
         }
 
         external_tables.clear();
@@ -976,6 +977,11 @@ void lambdaServerThreadFunction(int argc, char ** argv, LambdaHandlerCommunicato
 //     }
 // }
 
+const String API_GW_JSON_HTTP_METHOD = "httpMethod";
+const String API_GW_JSON_HTTP_REQUEST_CONTEXT = "requestContext";
+const String API_GW_JSON_BODY = "body";
+const String API_GW_JSON_IS_BASE64_ENCODED = "isBase64Encoded";
+
 const String LAMBDA_QUERY_JSON_CLICK_HOUSE = "clickHouse";
 const String LAMBDA_QUERY_JSON_QUERY = "query";
 const String LAMBDA_QUERY_JSON_OUTPUT_FORMAT = "outputFormat";
@@ -984,16 +990,47 @@ const String LAMBDA_QUERY_JSON_INPUT_STRUCTURE = "structure";
 const String LAMBDA_QUERY_JSON_INPUT_DATA = "data";
 const String LAMBDA_QUERY_EMPTY = "";
 
-LambdaQuery parseLambdaRequestPayload(const String& payload)
+const String LAMBDA_RESULT_JSON_FORMAT = "format";
+const String LAMBDA_RESULT_JSON_DATA = "data";
+const String LAMBDA_RESULT_JSON_ERROR = "error";
+
+enum class LambdaRequestContext
 {
+    DIRECT,
+    API_GW_REST,
+    API_GW_HTTP
+};
+
+LambdaQuery parseLambdaRequestPayload(const String& payload, LambdaRequestContext& context)
+{
+    context = LambdaRequestContext::DIRECT;
+
     Poco::JSON::Parser parser;
     auto json = parser.parse(payload).extract<Poco::JSON::Object::Ptr>();
+
+    const String& http_method = json->optValue<std::string>(API_GW_JSON_HTTP_METHOD, LAMBDA_QUERY_EMPTY);
+    const String& request_context = json->optValue<std::string>(API_GW_JSON_HTTP_REQUEST_CONTEXT, LAMBDA_QUERY_EMPTY);
+
+    if (!http_method.empty())
+        context = LambdaRequestContext::API_GW_REST;
+    else if (!request_context.empty())
+        context = LambdaRequestContext::API_GW_HTTP;
+
+    if (context != LambdaRequestContext::DIRECT)
+    {
+        String body = json->getValue<std::string>(API_GW_JSON_BODY);
+        const bool is_base64_encoded = json->optValue<std::string>(API_GW_JSON_IS_BASE64_ENCODED, "false") == "true";
+        if (is_base64_encoded)
+            body = base64Decode(body);
+
+        json = parser.parse(body).extract<Poco::JSON::Object::Ptr>();
+    }
 
     const Poco::JSON::Object::Ptr click_house_json = json->getObject(LAMBDA_QUERY_JSON_CLICK_HOUSE);
 
     LambdaQuery lambda_query;
 
-    lambda_query.query_text = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_QUERY, LAMBDA_QUERY_EMPTY);
+    lambda_query.query_text = click_house_json->getValue<std::string>(LAMBDA_QUERY_JSON_QUERY);
     lambda_query.output_format = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_OUTPUT_FORMAT, LAMBDA_QUERY_EMPTY);
     lambda_query.input_format = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_INPUT_FORMAT, LAMBDA_QUERY_EMPTY);
     lambda_query.input_structure = click_house_json->optValue<std::string>(LAMBDA_QUERY_JSON_INPUT_STRUCTURE, LAMBDA_QUERY_EMPTY);
@@ -1005,21 +1042,49 @@ LambdaQuery parseLambdaRequestPayload(const String& payload)
 aws::lambda_runtime::invocation_response lambdaHandler(DB::LambdaServerCommunicator & communicator, const aws::lambda_runtime::invocation_request & request)
 {
     LambdaQuery lambda_query;
+    std::optional<LambdaResult> lambda_result;
+    LambdaRequestContext request_context;
 
     try
     {
-        lambda_query = parseLambdaRequestPayload(request.payload);
+        lambda_query = parseLambdaRequestPayload(request.payload, request_context);
     }
     catch (const Poco::Exception & e)
     {
-        return aws::lambda_runtime::invocation_response::failure(
-            fmt::format("Failed to parse lambda input JSON: {}", e.displayText()) , "BAD_ARGUMENTS");
+        lambda_result.emplace(fmt::format("Failed to parse lambda input JSON: {}", e.displayText()));
     }
 
-    auto result = communicator.executeQuery(std::move(lambda_query));
-    if (result)
+    if (!lambda_result)
+        lambda_result = communicator.executeQuery(std::move(lambda_query));
+    
+    if (lambda_result)
     {
-        return aws::lambda_runtime::invocation_response::success(std::move(result->first), "application/json");
+        Poco::JSON::Object json;
+        if (lambda_result->error.empty())
+        {
+            json.set(LAMBDA_RESULT_JSON_FORMAT, lambda_result->format);
+            json.set(LAMBDA_RESULT_JSON_DATA, lambda_result->data);
+        }
+        else
+        {
+            json.set(LAMBDA_RESULT_JSON_ERROR, lambda_result->error);
+        }
+
+        std::ostringstream oss;
+        oss.exceptions(std::ios::failbit);
+
+        if (request_context == LambdaRequestContext::API_GW_REST)
+        {
+            Poco::JSON::Object api_gw_json;
+            api_gw_json.set(API_GW_JSON_BODY, json);
+            Poco::JSON::Stringifier::stringify(api_gw_json, oss);
+        }
+        else
+        {
+            Poco::JSON::Stringifier::stringify(json, oss);
+        }
+
+        return aws::lambda_runtime::invocation_response::success(oss.str(), "application/json");
     }
     else
     {

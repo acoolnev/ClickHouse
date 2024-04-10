@@ -15,15 +15,33 @@ struct LambdaQuery
     String input_data;
 };
 
+struct LambdaResult
+{
+    String format;
+    String data;
+    String error;
+
+    explicit LambdaResult() = default;
+
+    LambdaResult(String format_, String data_)
+        : format(std::move(format_)), data(std::move(data_))
+    
+    {}
+
+    explicit LambdaResult(String error_)
+        : error(std::move(error_))
+    {}
+};
+
 struct LambdaCommunicatorContext
 {
-    LambdaCommunicatorContext(size_t queue_size)
+    explicit LambdaCommunicatorContext(size_t queue_size)
         : query_queue(queue_size)
         , response_queue(queue_size)
     {}
 
     using QueryQueue = ConcurrentBoundedQueue<LambdaQuery>;
-    using ResponseQueue = ConcurrentBoundedQueue<std::pair<String, bool>>;
+    using ResponseQueue = ConcurrentBoundedQueue<LambdaResult>;
 
     QueryQueue query_queue;
     ResponseQueue response_queue;
@@ -32,19 +50,19 @@ struct LambdaCommunicatorContext
 class LambdaServerCommunicator
 {
 public:
-    LambdaServerCommunicator(LambdaCommunicatorContext & context_)
+    explicit LambdaServerCommunicator(LambdaCommunicatorContext & context_)
         : context(context_)
     {}
 
     /// Returns a pair with the query result (or error message) and a bool indicating success.
-    std::optional<std::pair<String, bool>> executeQuery(LambdaQuery && query)
+    std::optional<LambdaResult> executeQuery(LambdaQuery && query)
     {
         bool pushed = context.query_queue.push(std::move(query));
 
         if (pushed)
         {
-            if (std::pair<String, bool> response; context.response_queue.pop(response))
-                return response;
+            if (LambdaResult lambda_result; context.response_queue.pop(lambda_result))
+                return lambda_result;
 
             return std::nullopt;
         }
@@ -65,7 +83,7 @@ private:
 class LambdaHandlerCommunicator
 {
 public:
-    LambdaHandlerCommunicator(LambdaCommunicatorContext & context_)
+    explicit LambdaHandlerCommunicator(LambdaCommunicatorContext & context_)
         : context(context_)
     {}
 
@@ -78,9 +96,9 @@ public:
         return lambda_query;
     }
 
-    bool pushResponse(String && response, bool success)
+    bool pushResponse(LambdaResult && lambda_result)
     {
-        return context.response_queue.emplace(std::move(response), success);
+        return context.response_queue.emplace(std::move(lambda_result));
     }
 
     void close()
